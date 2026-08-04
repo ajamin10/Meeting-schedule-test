@@ -570,7 +570,7 @@
     <span>BM2 – Room 1.06</span>
     <span>BM3 – Room 1.07</span>
     <span>Room 5A</span>
-    <span>ESICM Meeting Room – 1.08</span>
+    <span id="esicmRoomLegend">ESICM Meeting Room – 1.08</span>
   </div>
 
   <div class="toolbar">
@@ -622,7 +622,7 @@
           <input type="time" id="meetingEnd" min="07:30" max="18:00" step="900">
         </div>
       </div>
-      <div class="form-hint">Meetings can run between 07:30 and 18:00, in any room.</div>
+      <div class="form-hint">Opening hours vary by day (Monday closes at 17:00, Wednesday at 14:00). Saturday and Sunday are only bookable by ESICM/KIT Group accounts.</div>
       <div class="form-row" style="margin-top:14px;">
         <label for="meetingName">Meeting name</label>
         <input type="text" id="meetingName" placeholder="e.g. TEM Section Meeting">
@@ -873,21 +873,85 @@ const snapshotMeetings = [
 
 snapshotMeetings.sort((a,b)=> a.day.localeCompare(b.day) || a.start.localeCompare(b.start));
 
+// Rooms the auto-placement engine is allowed to assign. Room 5A is
+// deliberately excluded - it only ever appears in the original snapshot
+// data and has no defined capacity, so it isn't offered for new bookings.
+const ESICM_ROOM = 'ESICM Meeting Room – 1.08';
+const BOOKABLE_ROOMS = ['BM1 – Room 1.05', 'BM2 – Room 1.06', 'BM3 – Room 1.07', ESICM_ROOM];
+const ROOM_CAPACITY = {
+  'BM1 – Room 1.05': 40,
+  'BM2 – Room 1.06': 40,
+  'BM3 – Room 1.07': 50,
+  [ESICM_ROOM]: 30
+};
+const SLOT_MINUTES = 15;
+
+// Days meetings can be booked on, with per-day opening hours. Saturday and
+// Sunday are weekend-restricted (booking only, not viewing - see
+// isPrivilegedEmail() below); Monday closes early at 17:00 and Wednesday at
+// 14:00, per the congress schedule.
+const CONGRESS_DAYS = [
+  {value:'2026-10-10', label:'Saturday, October 10, 2026'},
+  {value:'2026-10-11', label:'Sunday, October 11, 2026'},
+  {value:'2026-10-12', label:'Monday, October 12, 2026'},
+  {value:'2026-10-13', label:'Tuesday, October 13, 2026'},
+  {value:'2026-10-14', label:'Wednesday, October 14, 2026'}
+];
+const DAY_SETTINGS = {
+  '2026-10-10': { open: '07:30', close: '18:00', weekendRestricted: true },
+  '2026-10-11': { open: '07:30', close: '18:00', weekendRestricted: true },
+  '2026-10-12': { open: '07:30', close: '17:00', weekendRestricted: false },
+  '2026-10-13': { open: '07:30', close: '18:00', weekendRestricted: false },
+  '2026-10-14': { open: '07:30', close: '14:00', weekendRestricted: false }
+};
+
+// Two things are gated to ESICM/KIT Group accounts: the ESICM Meeting Room
+// (booking it and even seeing what's booked in it) and weekend (Sat/Sun)
+// bookings. This check only looks at the signed-in account's own email, so
+// it can be evaluated safely client-side - the Firestore rules enforce the
+// same two restrictions independently and are what actually matters.
+function isPrivilegedEmail(){
+  const email = (auth.currentUser && auth.currentUser.email || '').toLowerCase();
+  return /@(esicm\.org|kit-group\.org)$/.test(email);
+}
+
 // Meetings added through the "Add a new Business Meeting" form, synced live
-// from Firestore — every signed-in browser viewing this page shares the same list.
+// from Firestore — every signed-in browser viewing this page shares the same
+// list, EXCEPT the ESICM Meeting Room: those documents are only fetched at
+// all for accounts whose email domain qualifies (see isPrivilegedEmail()
+// below). This is a real Firestore-level split, not just a UI filter - two
+// separate queries, each scoped by a `where('room', ...)` clause, so the
+// second query is only ever issued (and only ever succeeds, per
+// firestore.rules) for privileged accounts.
+let addedMeetingsGeneral = [];
+let addedMeetingsEsicm = [];
 let addedMeetings = [];
 // Live edits/deletions applied to the original 27 planner meetings, keyed
 // by their stable snap-NN id. {deleted:true} hides that meeting entirely.
 let overridesMap = {};
 
-onSnapshot(meetingsCollection, snapshot => {
-  addedMeetings = snapshot.docs.map(d => ({ id: d.id, source: 'added', ...d.data() }));
+function recomputeAddedMeetings(){
+  addedMeetings = addedMeetingsGeneral.concat(addedMeetingsEsicm);
   populateDayFilter();
   render();
   updateRoomPreview();
+}
+
+onSnapshot(query(meetingsCollection, where('room', '!=', ESICM_ROOM)), snapshot => {
+  addedMeetingsGeneral = snapshot.docs.map(d => ({ id: d.id, source: 'added', ...d.data() }));
+  recomputeAddedMeetings();
 }, err => {
   console.error('Firestore sync error:', err);
 });
+
+if(isPrivilegedEmail()){
+  onSnapshot(query(meetingsCollection, where('room', '==', ESICM_ROOM)), snapshot => {
+    addedMeetingsEsicm = snapshot.docs.map(d => ({ id: d.id, source: 'added', ...d.data() }));
+    recomputeAddedMeetings();
+  }, err => {
+    console.error('Firestore ESICM room sync error:', err);
+  });
+}
 
 onSnapshot(overridesCollection, snapshot => {
   overridesMap = {};
@@ -899,9 +963,10 @@ onSnapshot(overridesCollection, snapshot => {
   console.error('Firestore overrides sync error:', err);
 });
 
-// Every signed-in visitor sees every room - the old "ESICM room hidden
-// unless you know a password" behaviour is gone now that a verified sign-in
-// is required just to reach this page at all.
+// Everyone can see every BM room; the ESICM Meeting Room's data is only
+// ever present in addedMeetings for privileged accounts (see above), and no
+// override can ever place an original snapshot meeting into that room (see
+// firestore.rules), so no extra filtering is needed here.
 function getAllMeetings(){
   const liveSnapshots = snapshotMeetings
     .map(m => {
@@ -959,32 +1024,24 @@ let editingSource = null; // 'added' | 'snapshot' | null
 let editingMeetingSnapshot = null; // full data of the meeting being edited, for changelog entries
 const LAST_VIEWED_CHANGELOG_KEY = 'lastViewedChangelog';
 
-// Rooms the auto-placement engine is allowed to assign. Room 5A is
-// deliberately excluded - it only ever appears in the original snapshot
-// data and has no defined capacity, so it isn't offered for new bookings.
-const ESICM_ROOM = 'ESICM Meeting Room – 1.08';
-const BOOKABLE_ROOMS = ['BM1 – Room 1.05', 'BM2 – Room 1.06', 'BM3 – Room 1.07', ESICM_ROOM];
-const ROOM_CAPACITY = {
-  'BM1 – Room 1.05': 40,
-  'BM2 – Room 1.06': 40,
-  'BM3 – Room 1.07': 50,
-  [ESICM_ROOM]: 30
-};
-const OPEN_TIME = '07:30';
-const CLOSE_TIME = '18:00';
-const SLOT_MINUTES = 15;
+// The ESICM room legend entry is only meaningful for accounts that can
+// actually see or book that room.
+document.getElementById('esicmRoomLegend').style.display = isPrivilegedEmail() ? '' : 'none';
 
-// Days meetings can be booked on.
-const CONGRESS_DAYS = [
-  {value:'2026-10-10', label:'Saturday, October 10, 2026'},
-  {value:'2026-10-11', label:'Sunday, October 11, 2026'},
-  {value:'2026-10-12', label:'Monday, October 12, 2026'},
-  {value:'2026-10-13', label:'Tuesday, October 13, 2026'},
-  {value:'2026-10-14', label:'Wednesday, October 14, 2026'}
-];
-meetingDaySelect.innerHTML = CONGRESS_DAYS
-  .map(d => `<option value="${d.value}">${d.label}</option>`)
-  .join('');
+// Populates the ADD/EDIT form's day dropdown. Weekend days are left out for
+// non-privileged accounts, unless forceIncludeDay is a weekend day already
+// on the meeting being edited (so opening an existing weekend meeting for
+// viewing still shows its real day, even though saving it will still be
+// rejected by the server-side ownership/weekend rules as appropriate).
+function populateMeetingDayOptions(forceIncludeDay){
+  const eligible = isPrivilegedEmail();
+  const days = CONGRESS_DAYS.filter(d =>
+    eligible || !DAY_SETTINGS[d.value].weekendRestricted || d.value === forceIncludeDay);
+  meetingDaySelect.innerHTML = days
+    .map(d => `<option value="${d.value}">${d.label}</option>`)
+    .join('');
+}
+populateMeetingDayOptions(null);
 
 function populateDayFilter(){
   const current = dayFilter.value;
@@ -1048,10 +1105,20 @@ function roomIsFree(room, day, start, end, excludeId){
 }
 
 // Best-fit: smallest bookable room that both fits the participant count and
-// is actually free for that day/time. Returns null if nothing qualifies.
+// is actually free for that day/time. Returns null if nothing qualifies -
+// including when the day/time falls outside that day's opening hours, when
+// the day is weekend-restricted and this account isn't privileged, or when
+// the only room that would fit is the ESICM room and this account isn't
+// privileged.
 function bestRoomFor(day, start, end, participants, excludeId){
+  const settings = DAY_SETTINGS[day];
+  if(!settings) return null;
+  if(start < settings.open || end > settings.close) return null;
+  if(settings.weekendRestricted && !isPrivilegedEmail()) return null;
+
   const candidates = BOOKABLE_ROOMS
     .filter(r => ROOM_CAPACITY[r] >= participants)
+    .filter(r => r !== ESICM_ROOM || isPrivilegedEmail())
     .sort((a,b) => ROOM_CAPACITY[a] - ROOM_CAPACITY[b]);
   for(const room of candidates){
     if(roomIsFree(room, day, start, end, excludeId)) return room;
@@ -1061,7 +1128,7 @@ function bestRoomFor(day, start, end, participants, excludeId){
 
 function findEarlierSlot(day, start, end, participants, excludeId){
   const duration = toMinutes(end) - toMinutes(start);
-  const openM = toMinutes(OPEN_TIME);
+  const openM = toMinutes(DAY_SETTINGS[day].open);
   let s = toMinutes(start) - SLOT_MINUTES;
   while(s >= openM){
     const e = s + duration;
@@ -1074,7 +1141,7 @@ function findEarlierSlot(day, start, end, participants, excludeId){
 
 function findLaterSlot(day, start, end, participants, excludeId){
   const duration = toMinutes(end) - toMinutes(start);
-  const closeM = toMinutes(CLOSE_TIME);
+  const closeM = toMinutes(DAY_SETTINGS[day].close);
   let s = toMinutes(start) + SLOT_MINUTES;
   while(s + duration <= closeM){
     const e = s + duration;
@@ -1142,10 +1209,24 @@ function updateRoomPreview(){
   const participants = Number(meetingParticipantsInput.value);
   suggestionsPanel.style.display = 'none';
 
-  if(!start || !end || !participants || participants <= 0 || start >= end){
+  if(!day || !start || !end || !participants || participants <= 0 || start >= end){
     roomPreview.textContent = "Enter a day, time, and participant count to see which room you'll get.";
     roomPreview.className = 'form-notice';
     confirmMeetingBtn.disabled = false;
+    return;
+  }
+
+  const daySettings = DAY_SETTINGS[day];
+  if(daySettings.weekendRestricted && !isPrivilegedEmail()){
+    roomPreview.textContent = 'Saturday and Sunday bookings are only available to ESICM or KIT Group accounts.';
+    roomPreview.className = 'form-error';
+    confirmMeetingBtn.disabled = true;
+    return;
+  }
+  if(start < daySettings.open || end > daySettings.close){
+    roomPreview.textContent = `This day only allows meetings between ${daySettings.open} and ${daySettings.close}.`;
+    roomPreview.className = 'form-error';
+    confirmMeetingBtn.disabled = true;
     return;
   }
 
@@ -1395,11 +1476,22 @@ async function showChangeHistory(){
   let entries = [];
 
   try {
-    const q = lastViewed
-      ? query(changelogCollection, where('timestamp', '>', lastViewed), orderBy('timestamp', 'desc'))
-      : query(changelogCollection, orderBy('timestamp', 'desc'));
-    const snap = await getDocs(q);
-    entries = snap.docs.map(d => d.data());
+    // Two separate queries, same reason as the meetings listener above:
+    // ESICM room entries are only fetched for privileged accounts, so
+    // that room's history never reaches anyone else's browser. Filtering
+    // and sorting happens client-side afterwards, since Firestore doesn't
+    // allow combining a `!=` filter with an inequality/orderBy on a
+    // different field in one query.
+    const generalSnap = await getDocs(query(changelogCollection, where('room', '!=', ESICM_ROOM)));
+    entries = generalSnap.docs.map(d => d.data());
+    if(isPrivilegedEmail()){
+      const esicmSnap = await getDocs(query(changelogCollection, where('room', '==', ESICM_ROOM)));
+      entries = entries.concat(esicmSnap.docs.map(d => d.data()));
+    }
+    if(lastViewed){
+      entries = entries.filter(e => e.timestamp > lastViewed);
+    }
+    entries.sort((a,b) => b.timestamp.localeCompare(a.timestamp));
   } catch(err){
     console.error('Could not load change history:', err);
   }
@@ -1483,7 +1575,8 @@ function openMeetingForm(existing){
   suggestionsPanel.style.display = 'none';
   meetingFormTitle.textContent = existing ? 'Edit Business Meeting' : 'Add a new Business Meeting';
 
-  meetingDaySelect.value = existing ? existing.day : CONGRESS_DAYS[0].value;
+  populateMeetingDayOptions(existing ? existing.day : null);
+  meetingDaySelect.value = existing ? existing.day : meetingDaySelect.options[0].value;
   meetingStartInput.value = existing ? existing.start : '';
   meetingEndInput.value = existing ? existing.end : '';
   meetingNameInput.value = existing ? existing.title : '';
@@ -1507,14 +1600,16 @@ meetingForm.addEventListener('submit', async e => {
   const participants = meetingParticipantsInput.value;
   const logisticsNotes = meetingNeedsInput.value.trim();
 
+  const daySettings = DAY_SETTINGS[day];
   const errors = [];
   if(!title) errors.push('Please enter a meeting name.');
   if(!start || !end){
     errors.push('Please enter both a start and end time.');
   } else {
-    if(start < OPEN_TIME || end > CLOSE_TIME) errors.push(`Meetings must start at or after ${OPEN_TIME} and end at or before ${CLOSE_TIME}.`);
+    if(start < daySettings.open || end > daySettings.close) errors.push(`Meetings on this day must start at or after ${daySettings.open} and end at or before ${daySettings.close}.`);
     if(start >= end) errors.push('The end time must be after the start time.');
   }
+  if(daySettings.weekendRestricted && !isPrivilegedEmail()) errors.push('Meetings on Saturday or Sunday can only be booked by ESICM or KIT Group accounts.');
   if(!participants || Number(participants) <= 0) errors.push('Please enter the expected number of participants.');
 
   if(errors.length){
