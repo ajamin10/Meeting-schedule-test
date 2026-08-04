@@ -657,6 +657,23 @@
         <label for="meetingNeeds">Room / logistics requests (optional)</label>
         <textarea id="meetingNeeds" rows="2" placeholder="AV setup, catering, room layout — please do not enter health or accessibility information here"></textarea>
       </div>
+      <div id="adminContactBlock" style="display:none;">
+        <div class="form-hint" style="margin-top:14px;">Admin-only contact details for this meeting. Stored separately from the meeting itself, never shown to attendees or in the regular export — only in the Detailed meeting list download.</div>
+        <div class="form-row form-row-split">
+          <div>
+            <label for="contactNameInput">Contact name</label>
+            <input type="text" id="contactNameInput">
+          </div>
+          <div>
+            <label for="contactSurnameInput">Contact surname</label>
+            <input type="text" id="contactSurnameInput">
+          </div>
+        </div>
+        <div class="form-row">
+          <label for="contactEmailInput">Contact email</label>
+          <input type="email" id="contactEmailInput">
+        </div>
+      </div>
       <div class="form-error" id="meetingFormError" style="display:none;"></div>
       <div class="modal-actions">
         <button type="button" class="btn-danger" id="deleteMeetingBtn" style="display:none;">Delete meeting</button>
@@ -725,6 +742,13 @@ const overridesCollection = collection(db, 'overrides');
 // itself. It exists purely so an admin can open the Firestore console and
 // see who added/edited/deleted a given meeting.
 const auditLogCollection = collection(db, 'auditLog');
+// Admin-only contact details (name/surname/email) for the original 27
+// planner meetings, which have no createdByUid and so no identity at all
+// otherwise. Read AND write both require isAdmin() in firestore.rules -
+// nobody but an admin can even see whether a document exists here, let
+// alone its contents. Only ever surfaced in the Detailed meeting list
+// export - never rendered anywhere in the page itself.
+const snapshotContactsCollection = collection(db, 'snapshotContacts');
 
 // ============================================================
 // ---- Sign-in gate (Firebase Authentication, email link) ----
@@ -1021,6 +1045,10 @@ const roomPreview = document.getElementById('roomPreview');
 const suggestionsPanel = document.getElementById('suggestionsPanel');
 const suggestionsList = document.getElementById('suggestionsList');
 const meetingNeedsInput = document.getElementById('meetingNeeds');
+const adminContactBlock = document.getElementById('adminContactBlock');
+const contactNameInput = document.getElementById('contactNameInput');
+const contactSurnameInput = document.getElementById('contactSurnameInput');
+const contactEmailInput = document.getElementById('contactEmailInput');
 const meetingFormError = document.getElementById('meetingFormError');
 const deleteMeetingBtn = document.getElementById('deleteMeetingBtn');
 const cancelMeetingBtn = document.getElementById('cancelMeetingBtn');
@@ -1683,7 +1711,7 @@ async function logChange(action, meeting){
 }
 
 // ---- Add / edit meeting form ----
-function openMeetingForm(existing){
+async function openMeetingForm(existing){
   editingId = existing ? existing.id : null;
   editingSource = existing ? existing.source : null;
   editingMeetingSnapshot = existing ? { ...existing } : null;
@@ -1700,6 +1728,29 @@ function openMeetingForm(existing){
   meetingNeedsInput.value = existing ? (existing.logisticsNotes || '') : '';
   esicmRoomOptIn.checked = existing ? existing.room === ESICM_ROOM : false;
   meetingRoomSelect.value = (existing && BOOKABLE_ROOMS.includes(existing.room)) ? existing.room : '';
+
+  // Admin-only contact details only make sense for the original planner
+  // meetings (source === 'snapshot') - attendee-added meetings already have
+  // their creator's identity captured automatically via auditLog.
+  const showContactBlock = currentUserIsAdmin && existing && existing.source === 'snapshot';
+  adminContactBlock.style.display = showContactBlock ? 'block' : 'none';
+  contactNameInput.value = '';
+  contactSurnameInput.value = '';
+  contactEmailInput.value = '';
+  if(showContactBlock){
+    try {
+      const snap = await getDoc(doc(db, 'snapshotContacts', existing.id));
+      if(snap.exists()){
+        const c = snap.data();
+        contactNameInput.value = c.name || '';
+        contactSurnameInput.value = c.surname || '';
+        contactEmailInput.value = c.email || '';
+      }
+    } catch(err){
+      console.error('Could not load contact details:', err);
+    }
+  }
+
   updateRoomPreview();
   deleteMeetingBtn.style.display = existing ? 'inline-block' : 'none';
   meetingFormModal.style.display = 'flex';
@@ -1796,6 +1847,27 @@ meetingForm.addEventListener('submit', async e => {
     } else {
       await addDoc(meetingsCollection, payload);
     }
+
+    // Admin-only contact details, saved separately from the meeting itself
+    // (only ever readable via isAdmin() - see firestore.rules). Only
+    // applies to the original planner meetings, and only for admins.
+    if(currentUserIsAdmin && wasEditing && editingSource === 'snapshot'){
+      const contactName = contactNameInput.value.trim();
+      const contactSurname = contactSurnameInput.value.trim();
+      const contactEmail = contactEmailInput.value.trim();
+      try {
+        if(contactName || contactSurname || contactEmail){
+          await setDoc(doc(db, 'snapshotContacts', editingId), {
+            name: contactName, surname: contactSurname, email: contactEmail
+          });
+        } else {
+          await deleteDoc(doc(db, 'snapshotContacts', editingId)).catch(() => {});
+        }
+      } catch(err){
+        console.error('Could not save contact details:', err);
+      }
+    }
+
     logChange(wasEditing ? 'edited' : 'added', payload);
     meetingFormModal.style.display = 'none';
     editingId = null;
@@ -1980,15 +2052,20 @@ async function downloadDetailedExcelExport(){
     return;
   }
 
-  let auditSnap;
+  let auditSnap, contactsSnap;
   try {
-    auditSnap = await getDocs(query(collection(db, 'auditLog'), orderBy('timestamp', 'desc')));
+    [auditSnap, contactsSnap] = await Promise.all([
+      getDocs(query(collection(db, 'auditLog'), orderBy('timestamp', 'desc'))),
+      getDocs(snapshotContactsCollection)
+    ]);
   } catch(err){
-    console.error('Detailed export failed — could not read audit log:', err);
+    console.error('Detailed export failed — could not read audit log or contact details:', err);
     alert("You don't have permission to download the detailed meeting list.");
     return;
   }
 
+  // Attendee-added meetings: identity comes from who signed in and created
+  // it (auditLog), keyed by their stable account uid.
   const uidToIdentity = {};
   auditSnap.docs.forEach(d => {
     const e = d.data();
@@ -2000,6 +2077,14 @@ async function downloadDetailedExcelExport(){
     }
   });
 
+  // Original planner meetings have no creator account at all - their
+  // contact details, if entered, live in the admin-only snapshotContacts
+  // collection, keyed by the meeting's own snap-NN id.
+  const meetingIdToContact = {};
+  contactsSnap.docs.forEach(d => {
+    meetingIdToContact[d.id] = d.data();
+  });
+
   const all = getAllMeetings()
     .slice()
     .sort((a,b) => a.day.localeCompare(b.day) || a.start.localeCompare(b.start));
@@ -2009,15 +2094,26 @@ async function downloadDetailedExcelExport(){
     'Name', 'Surname', 'Email', 'Comments'
   ]];
   all.forEach(m => {
-    const identity = m.createdByUid ? uidToIdentity[m.createdByUid] : null;
-    const fullName = identity ? (identity.name || '').trim() : '';
-    const [firstName, ...rest] = fullName ? fullName.split(/\s+/) : [''];
+    let name = '', surname = '', email = '';
+    if(m.source === 'snapshot'){
+      const contact = meetingIdToContact[m.id];
+      if(contact){
+        name = contact.name || '';
+        surname = contact.surname || '';
+        email = contact.email || '';
+      }
+    } else if(m.createdByUid && uidToIdentity[m.createdByUid]){
+      const identity = uidToIdentity[m.createdByUid];
+      const fullName = (identity.name || '').trim();
+      const [firstName, ...rest] = fullName ? fullName.split(/\s+/) : [''];
+      name = firstName || '';
+      surname = rest.join(' ');
+      email = identity.email || '';
+    }
     rows.push([
       m.dayLabel, m.start, m.end, m.title, m.room,
       m.participants != null ? m.participants : '',
-      identity ? firstName : '',
-      identity ? rest.join(' ') : '',
-      identity ? identity.email : '',
+      name, surname, email,
       m.logisticsNotes || ''
     ]);
   });
