@@ -1107,9 +1107,16 @@ function refreshPrivilegedUI(){
   // opt-in checkbox, so only show one or the other.
   esicmRoomOptRow.style.display = (isPrivilegedEmail() && !currentUserIsAdmin) ? '' : 'none';
   adminRoomRow.style.display = currentUserIsAdmin ? '' : 'none';
-  // The regular export is limited to ESICM/KIT Group accounts; the
-  // detailed export (with names/emails/comments) is admin-only.
+  // The regular export is limited to ESICM/KIT Group accounts. Change
+  // history, the audit log, the detailed export, and the contact-import
+  // tool are all admin-only to even see the link for - the audit log and
+  // the two admin-only collections were already enforced server-side
+  // either way, but change history (which has no PII at all) is hidden
+  // here purely as a UI choice, not a security boundary; the underlying
+  // changelog collection is still readable by any signed-in account.
   exportLink.style.display = isPrivilegedEmail() ? '' : 'none';
+  historyLink.style.display = currentUserIsAdmin ? '' : 'none';
+  auditLogLink.style.display = currentUserIsAdmin ? '' : 'none';
   detailedExportLink.style.display = currentUserIsAdmin ? '' : 'none';
   bulkImportContactsLink.style.display = currentUserIsAdmin ? '' : 'none';
 }
