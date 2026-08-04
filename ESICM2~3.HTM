@@ -355,10 +355,15 @@
     background:var(--navy);
     color:#fff;
   }
+  .btn-primary:disabled{
+    opacity:0.5;
+    cursor:not-allowed;
+  }
   .btn-secondary{
     background:#fff;
     color:var(--navy-dark);
     border-color:var(--border);
+    text-align:left;
   }
   .btn-danger{
     background:#fff;
@@ -577,12 +582,13 @@
     <select id="dayFilter">
       <option value="">All days</option>
     </select>
-    <button type="button" id="loginBtn" class="btn-secondary" style="margin-left:auto;">Login</button>
-    <button type="button" id="addMeetingBtn" class="btn-primary">+ Add a new Business Meeting</button>
+    <button type="button" id="addMeetingBtn" class="btn-primary" style="margin-left:auto;">+ Add a new Business Meeting</button>
   </div>
 
   <div class="export-row">
     <a href="#" id="exportLink">Export full meeting list</a>
+    &nbsp;·&nbsp;
+    <a href="#" id="historyLink">Change history</a>
     &nbsp;·&nbsp;
     <a href="#" id="auditLogLink">Audit log</a>
   </div>
@@ -594,31 +600,13 @@
 </div>
 
 <footer>
-  Access to this page requires a verified sign-in. Please contact the ESICM2026 Congress Secretariat for any changes to your official meeting record.
+  Access to this page requires a verified sign-in. Rooms are assigned automatically based on your participant count and chosen time. Please contact the ESICM2026 Congress Secretariat for any questions about your booking.
 </footer>
-
-<div class="modal-overlay" id="passwordModal">
-  <div class="modal-box">
-    <h2>Enter password</h2>
-    <p class="modal-sub" id="passwordModalSubtitle">Adding a meeting or exporting the list requires a congress secretariat password.</p>
-    <form id="passwordForm">
-      <div class="form-row">
-        <label for="passwordInput">Password</label>
-        <input type="password" id="passwordInput" autocomplete="off">
-      </div>
-      <div class="form-error" id="passwordError" style="display:none;">Incorrect password. Please try again.</div>
-      <div class="modal-actions">
-        <button type="button" class="btn-secondary" id="passwordCancelBtn">Cancel</button>
-        <button type="submit" class="btn-primary">Unlock</button>
-      </div>
-    </form>
-  </div>
-</div>
 
 <div class="modal-overlay" id="meetingFormModal">
   <div class="modal-box">
     <h2 id="meetingFormTitle">Add a new Business Meeting</h2>
-    <p class="modal-sub" id="meetingFormSubtitle">Location for meetings added here is fixed to <strong>ESICM Meeting Room – 1.08</strong>.</p>
+    <p class="modal-sub">We'll automatically place this meeting in the best available room based on your participant count and chosen time — there's no room to pick.</p>
     <form id="meetingForm">
       <div class="form-row">
         <label for="meetingDay">Day</label>
@@ -634,19 +622,22 @@
           <input type="time" id="meetingEnd" min="07:30" max="18:00" step="900">
         </div>
       </div>
-      <div class="form-hint">Meetings can run between 07:30 and 18:00.</div>
+      <div class="form-hint">Meetings can run between 07:30 and 18:00, in any room.</div>
       <div class="form-row" style="margin-top:14px;">
         <label for="meetingName">Meeting name</label>
         <input type="text" id="meetingName" placeholder="e.g. TEM Section Meeting">
       </div>
-      <div class="form-row" id="meetingRoomRow" style="display:none;">
-        <label for="meetingRoom">Room</label>
-        <select id="meetingRoom"></select>
-      </div>
       <div class="form-row">
         <label for="meetingParticipants">Number of participants</label>
         <input type="number" id="meetingParticipants" min="1">
-        <div class="form-hint" id="participantsHint">Room 1.08 capacity: 30 seated.</div>
+      </div>
+      <div class="form-row">
+        <div id="roomPreview" class="form-notice">Enter a day, time, and participant count to see which room you'll get.</div>
+      </div>
+      <div id="suggestionsPanel" style="display:none;">
+        <div class="form-error">That time is fully booked for this many people.</div>
+        <p class="form-hint" style="margin:8px 0;">Closest alternatives:</p>
+        <div id="suggestionsList" style="display:flex; flex-direction:column; gap:8px; margin-bottom:6px;"></div>
       </div>
       <div class="form-row">
         <label for="meetingNeeds">Room / logistics requests (optional)</label>
@@ -664,11 +655,11 @@
 
 <div class="modal-overlay" id="historyModal">
   <div class="modal-box" style="max-width:540px;">
-    <h2>Manager change history</h2>
+    <h2>Change history</h2>
     <p class="modal-sub" id="historyIntro"></p>
     <div id="historyList"></div>
     <div class="modal-actions">
-      <button type="button" class="btn-primary" id="historyContinueBtn">Continue</button>
+      <button type="button" class="btn-primary" id="historyContinueBtn">Close</button>
     </div>
   </div>
 </div>
@@ -699,11 +690,6 @@ import {
   signInWithEmailLink, onAuthStateChanged, updateProfile, signOut
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
 
-// >>> TEST BUILD - this must point at a throwaway sandbox Firebase project,
-// >>> NEVER the real "lives-2026-business-meetings" project. Create a new
-// >>> project in the Firebase console, add a Web app to it, and paste its
-// >>> config object here in place of the placeholders below. See
-// >>> "0. Test safely first" in ESICM2026_BM_access_gate_setup.md.
 const firebaseConfig = {
   apiKey: "AIzaSyBngOkFgJe1H2S1RCDYkkpsL_n8W1fkolk",
   authDomain: "test-bsuiness-meeting-schedule.firebaseapp.com",
@@ -718,24 +704,21 @@ const db = getFirestore(firebaseApp);
 const auth = getAuth(firebaseApp);
 const meetingsCollection = collection(db, 'meetings');
 const changelogCollection = collection(db, 'changelog');
+const overridesCollection = collection(db, 'overrides');
 // Write-only audit trail pairing each change with the signed-in person's
 // identity. Nobody can read this collection through the app (see
-// firestore.rules) - not even other managers. It exists purely so you can
-// open the Firestore console yourself and see who added/edited/deleted a
-// given meeting, without that identity ever being exposed anywhere in the
-// page's UI or to any other signed-in visitor.
+// firestore.rules) - not attendees, not admins while browsing the page
+// itself. It exists purely so an admin can open the Firestore console and
+// see who added/edited/deleted a given meeting.
 const auditLogCollection = collection(db, 'auditLog');
-const overridesCollection = collection(db, 'overrides');
 
 // ============================================================
 // ---- Sign-in gate (Firebase Authentication, email link) ----
-// This is a real access-control gate, not just a distribution trick: the
-// Firestore security rules (see firestore.rules) require a verified,
-// signed-in user for every read and write. Nobody can load or edit the
-// schedule without completing this step, and every session is tied to a
-// verified email address. Name/surname are attached to the account as its
-// display name and are visible to you in the Firebase console
-// (Authentication → Users) — never rendered anywhere on this page.
+// This is a real access-control gate: the Firestore security rules
+// require a verified, signed-in user for every read and write. Name/
+// surname are attached to the account as its display name and are visible
+// to you in the Firebase console (Authentication → Users) — never
+// rendered anywhere on this page.
 // ============================================================
 const authLoading = document.getElementById('authLoading');
 const authGate = document.getElementById('authGate');
@@ -756,8 +739,6 @@ const EMAIL_FOR_SIGNIN_KEY = 'esicmBmEmailForSignIn';
 const NAME_FOR_SIGNIN_KEY = 'esicmBmNameForSignIn';
 
 function actionCodeSettings(){
-  // Strip any existing query string so the link we email out is clean;
-  // Firebase appends its own sign-in parameters to this URL.
   const url = window.location.origin + window.location.pathname;
   return { url, handleCodeInApp: true };
 }
@@ -810,7 +791,6 @@ async function completeSignInIfReturningFromLink(){
 
   let email = window.localStorage.getItem(EMAIL_FOR_SIGNIN_KEY);
   if(!email){
-    // Link opened on a different device/browser than it was requested on.
     email = window.prompt('Please confirm the email address you used to request this link:');
   }
   if(!email) return;
@@ -823,7 +803,6 @@ async function completeSignInIfReturningFromLink(){
     }
     window.localStorage.removeItem(EMAIL_FOR_SIGNIN_KEY);
     window.localStorage.removeItem(NAME_FOR_SIGNIN_KEY);
-    // Clean the sign-in parameters out of the URL bar.
     window.history.replaceState({}, document.title, window.location.pathname);
   } catch(err){
     console.error('Sign-in link failed:', err);
@@ -905,6 +884,7 @@ onSnapshot(meetingsCollection, snapshot => {
   addedMeetings = snapshot.docs.map(d => ({ id: d.id, source: 'added', ...d.data() }));
   populateDayFilter();
   render();
+  updateRoomPreview();
 }, err => {
   console.error('Firestore sync error:', err);
 });
@@ -914,10 +894,14 @@ onSnapshot(overridesCollection, snapshot => {
   snapshot.docs.forEach(d => { overridesMap[d.id] = d.data(); });
   populateDayFilter();
   render();
+  updateRoomPreview();
 }, err => {
   console.error('Firestore overrides sync error:', err);
 });
 
+// Every signed-in visitor sees every room - the old "ESICM room hidden
+// unless you know a password" behaviour is gone now that a verified sign-in
+// is required just to reach this page at all.
 function getAllMeetings(){
   const liveSnapshots = snapshotMeetings
     .map(m => {
@@ -927,13 +911,7 @@ function getAllMeetings(){
       return { ...m, ...override, source: 'snapshot', edited: true };
     })
     .filter(Boolean);
-  let all = liveSnapshots.concat(addedMeetings);
-  // Room 1.08 (ESICM Meeting Room) meetings are only visible to logged-in
-  // (password) users — regular or manager password, either is enough.
-  if(!sessionRole){
-    all = all.filter(m => m.room !== ESICM_ROOM);
-  }
-  return all;
+  return liveSnapshots.concat(addedMeetings);
 }
 
 const scheduleContainer = document.getElementById('scheduleContainer');
@@ -944,29 +922,21 @@ const noResults = document.getElementById('noResults');
 const listViewBtn = document.getElementById('listViewBtn');
 const timetableViewBtn = document.getElementById('timetableViewBtn');
 
-const loginBtn = document.getElementById('loginBtn');
 const addMeetingBtn = document.getElementById('addMeetingBtn');
 const exportLink = document.getElementById('exportLink');
-
-const passwordModal = document.getElementById('passwordModal');
-const passwordForm = document.getElementById('passwordForm');
-const passwordInput = document.getElementById('passwordInput');
-const passwordError = document.getElementById('passwordError');
-const passwordModalSubtitle = document.getElementById('passwordModalSubtitle');
-const passwordCancelBtn = document.getElementById('passwordCancelBtn');
+const historyLink = document.getElementById('historyLink');
 
 const meetingFormModal = document.getElementById('meetingFormModal');
 const meetingForm = document.getElementById('meetingForm');
 const meetingFormTitle = document.getElementById('meetingFormTitle');
-const meetingFormSubtitle = document.getElementById('meetingFormSubtitle');
 const meetingDaySelect = document.getElementById('meetingDay');
 const meetingStartInput = document.getElementById('meetingStart');
 const meetingEndInput = document.getElementById('meetingEnd');
 const meetingNameInput = document.getElementById('meetingName');
-const meetingRoomRow = document.getElementById('meetingRoomRow');
-const meetingRoomSelect = document.getElementById('meetingRoom');
 const meetingParticipantsInput = document.getElementById('meetingParticipants');
-const participantsHint = document.getElementById('participantsHint');
+const roomPreview = document.getElementById('roomPreview');
+const suggestionsPanel = document.getElementById('suggestionsPanel');
+const suggestionsList = document.getElementById('suggestionsList');
 const meetingNeedsInput = document.getElementById('meetingNeeds');
 const meetingFormError = document.getElementById('meetingFormError');
 const deleteMeetingBtn = document.getElementById('deleteMeetingBtn');
@@ -984,23 +954,25 @@ const auditLogList = document.getElementById('auditLogList');
 const auditLogCloseBtn = document.getElementById('auditLogCloseBtn');
 
 let viewMode = 'list';
-let sessionRole = null; // null | 'regular' | 'manager'
-let pendingUnlockCallback = null;
 let editingId = null;
 let editingSource = null; // 'added' | 'snapshot' | null
 let editingMeetingSnapshot = null; // full data of the meeting being edited, for changelog entries
-let historyContinueCallback = null;
-const LAST_MANAGER_LOGIN_KEY = 'managerLastLogin';
+const LAST_VIEWED_CHANGELOG_KEY = 'lastViewedChangelog';
 
-const ADD_PASSWORD = 'LIVES2026BM';
-const MANAGER_PASSWORD = 'LIVES2026Manager';
+// Rooms the auto-placement engine is allowed to assign. Room 5A is
+// deliberately excluded - it only ever appears in the original snapshot
+// data and has no defined capacity, so it isn't offered for new bookings.
 const ESICM_ROOM = 'ESICM Meeting Room – 1.08';
+const BOOKABLE_ROOMS = ['BM1 – Room 1.05', 'BM2 – Room 1.06', 'BM3 – Room 1.07', ESICM_ROOM];
 const ROOM_CAPACITY = {
-  "BM1 – Room 1.05": 40,
-  "BM2 – Room 1.06": 40,
-  "BM3 – Room 1.07": 50,
+  'BM1 – Room 1.05': 40,
+  'BM2 – Room 1.06': 40,
+  'BM3 – Room 1.07': 50,
   [ESICM_ROOM]: 30
 };
+const OPEN_TIME = '07:30';
+const CLOSE_TIME = '18:00';
+const SLOT_MINUTES = 15;
 
 // Days meetings can be booked on.
 const CONGRESS_DAYS = [
@@ -1031,17 +1003,11 @@ function populateDayFilter(){
 populateDayFilter();
 
 // Canonical room order for the timetable columns; anything unrecognised
-// (e.g. a meeting moved to a non-BM room) is appended alphabetically.
-const ROOM_ORDER = ["BM1 – Room 1.05", "BM2 – Room 1.06", "BM3 – Room 1.07", ESICM_ROOM];
+// (e.g. Room 5A) is appended alphabetically.
 function roomSortIndex(room){
-  const idx = ROOM_ORDER.indexOf(room);
-  return idx === -1 ? ROOM_ORDER.length : idx;
+  const idx = BOOKABLE_ROOMS.indexOf(room);
+  return idx === -1 ? BOOKABLE_ROOMS.length : idx;
 }
-
-// Only shown to managers — regular users can only book the ESICM room.
-meetingRoomSelect.innerHTML = ROOM_ORDER
-  .map(r => `<option value="${r}">${r}</option>`)
-  .join('');
 
 // Consistent colour per room (assigned on first use, from a fixed palette)
 const ROOM_PALETTE = ["#0b3d66", "#7a3b12", "#2f6b4f", "#6b3fa0", "#a13d5c", "#3d6b8a", "#8a5a3d"];
@@ -1058,6 +1024,147 @@ function toMinutes(hhmm){
   const [h,m] = hhmm.split(':').map(Number);
   return h*60+m;
 }
+function toHHMM(mins){
+  const h = Math.floor(mins/60), m = mins%60;
+  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+}
+
+// ============================================================
+// ---- Auto room placement + availability engine ----
+// ============================================================
+
+// All meetings sharing a room+day, optionally excluding one (the meeting
+// currently being edited, so it doesn't conflict with its own old slot).
+function meetingsForRoomOnDay(room, day, excludeId){
+  return getAllMeetings().filter(m => m.room === room && m.day === day && m.id !== excludeId);
+}
+
+function roomIsFree(room, day, start, end, excludeId){
+  const startM = toMinutes(start), endM = toMinutes(end);
+  return !meetingsForRoomOnDay(room, day, excludeId).some(m => {
+    const s = toMinutes(m.start), e = toMinutes(m.end);
+    return startM < e && endM > s; // standard interval overlap test
+  });
+}
+
+// Best-fit: smallest bookable room that both fits the participant count and
+// is actually free for that day/time. Returns null if nothing qualifies.
+function bestRoomFor(day, start, end, participants, excludeId){
+  const candidates = BOOKABLE_ROOMS
+    .filter(r => ROOM_CAPACITY[r] >= participants)
+    .sort((a,b) => ROOM_CAPACITY[a] - ROOM_CAPACITY[b]);
+  for(const room of candidates){
+    if(roomIsFree(room, day, start, end, excludeId)) return room;
+  }
+  return null;
+}
+
+function findEarlierSlot(day, start, end, participants, excludeId){
+  const duration = toMinutes(end) - toMinutes(start);
+  const openM = toMinutes(OPEN_TIME);
+  let s = toMinutes(start) - SLOT_MINUTES;
+  while(s >= openM){
+    const e = s + duration;
+    const room = bestRoomFor(day, toHHMM(s), toHHMM(e), participants, excludeId);
+    if(room) return { day, start: toHHMM(s), end: toHHMM(e), room };
+    s -= SLOT_MINUTES;
+  }
+  return null;
+}
+
+function findLaterSlot(day, start, end, participants, excludeId){
+  const duration = toMinutes(end) - toMinutes(start);
+  const closeM = toMinutes(CLOSE_TIME);
+  let s = toMinutes(start) + SLOT_MINUTES;
+  while(s + duration <= closeM){
+    const e = s + duration;
+    const room = bestRoomFor(day, toHHMM(s), toHHMM(e), participants, excludeId);
+    if(room) return { day, start: toHHMM(s), end: toHHMM(e), room };
+    s += SLOT_MINUTES;
+  }
+  return null;
+}
+
+function findOtherDaySlot(day, start, end, participants, excludeId){
+  const otherDays = CONGRESS_DAYS.map(d => d.value).filter(d => d !== day);
+  for(const otherDay of otherDays){
+    const room = bestRoomFor(otherDay, start, end, participants, excludeId);
+    if(room) return { day: otherDay, start, end, room };
+  }
+  return null;
+}
+
+// Up to three alternatives: closest earlier time, closest later time (both
+// same day), and the same time on the closest other day.
+function buildSuggestions(day, start, end, participants, excludeId){
+  const suggestions = [];
+  const earlier = findEarlierSlot(day, start, end, participants, excludeId);
+  if(earlier) suggestions.push({ label: 'Earlier that day', ...earlier });
+  const later = findLaterSlot(day, start, end, participants, excludeId);
+  if(later) suggestions.push({ label: 'Later that day', ...later });
+  const otherDay = findOtherDaySlot(day, start, end, participants, excludeId);
+  if(otherDay) suggestions.push({ label: 'Same time, another day', ...otherDay });
+  return suggestions;
+}
+
+function renderSuggestions(day, start, end, participants){
+  const suggestions = buildSuggestions(day, start, end, participants, editingId);
+  suggestionsList.innerHTML = '';
+  if(suggestions.length === 0){
+    suggestionsList.innerHTML = '<p class="history-empty">No alternative slot is available for this many participants.</p>';
+  } else {
+    suggestions.forEach(s => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-secondary';
+      const dLabel = CONGRESS_DAYS.find(d => d.value === s.day).label;
+      btn.textContent = `${s.label}: ${dLabel}, ${s.start}–${s.end} (${s.room})`;
+      btn.addEventListener('click', () => {
+        meetingDaySelect.value = s.day;
+        meetingStartInput.value = s.start;
+        meetingEndInput.value = s.end;
+        updateRoomPreview();
+      });
+      suggestionsList.appendChild(btn);
+    });
+  }
+  suggestionsPanel.style.display = 'block';
+}
+
+// Live preview shown as the visitor fills in the form. Also the single
+// source of truth for whether Confirm is even clickable - if no room is
+// free at the requested time, they can't submit; they have to either
+// change the request or pick one of the suggested alternatives.
+function updateRoomPreview(){
+  const day = meetingDaySelect.value;
+  const start = meetingStartInput.value;
+  const end = meetingEndInput.value;
+  const participants = Number(meetingParticipantsInput.value);
+  suggestionsPanel.style.display = 'none';
+
+  if(!start || !end || !participants || participants <= 0 || start >= end){
+    roomPreview.textContent = "Enter a day, time, and participant count to see which room you'll get.";
+    roomPreview.className = 'form-notice';
+    confirmMeetingBtn.disabled = false;
+    return;
+  }
+
+  const room = bestRoomFor(day, start, end, participants, editingId);
+  if(room){
+    roomPreview.textContent = `You'll be placed in ${room} (capacity ${ROOM_CAPACITY[room]}).`;
+    roomPreview.className = 'form-notice';
+    confirmMeetingBtn.disabled = false;
+  } else {
+    roomPreview.textContent = `No room is free for ${participants} participants at this time.`;
+    roomPreview.className = 'form-error';
+    confirmMeetingBtn.disabled = true;
+    renderSuggestions(day, start, end, participants);
+  }
+}
+meetingDaySelect.addEventListener('change', updateRoomPreview);
+meetingStartInput.addEventListener('change', updateRoomPreview);
+meetingEndInput.addEventListener('change', updateRoomPreview);
+meetingParticipantsInput.addEventListener('input', updateRoomPreview);
 
 // Used to stamp the exported filename with the download date/time in
 // Berlin time, regardless of the browser's own local timezone.
@@ -1140,7 +1247,7 @@ function renderList(filtered){
       editBtn.type = 'button';
       editBtn.className = 'card-edit-btn';
       editBtn.textContent = 'Edit';
-      editBtn.addEventListener('click', () => requestUnlock(() => openMeetingForm(m), { requireManager: m.room !== ESICM_ROOM }));
+      editBtn.addEventListener('click', () => openMeetingForm(m));
       card.appendChild(editBtn);
       group.appendChild(card);
     });
@@ -1162,19 +1269,15 @@ function renderTimetable(filtered){
     const dayMeetings = grouped[day];
     const dayLabel = dayMeetings[0].dayLabel;
 
-    // Rooms present this day, canonical order first
     const rooms = [...new Set(dayMeetings.map(m => m.room))]
       .sort((a,b) => roomSortIndex(a) - roomSortIndex(b) || a.localeCompare(b));
 
-    // Day time bounds, rounded out to the hour so gridlines land on :00
     let minStart = Math.min(...dayMeetings.map(m => toMinutes(m.start)));
     let maxEnd   = Math.max(...dayMeetings.map(m => toMinutes(m.end)));
     minStart = Math.floor(minStart/60)*60;
     maxEnd   = Math.ceil(maxEnd/60)*60;
     const totalHeight = (maxEnd - minStart) * PX_PER_MIN;
 
-    // Per-room lane packing: spreads genuinely overlapping bookings in the
-    // SAME room side by side, which surfaces real room double-bookings.
     const laneInfo = {};
     rooms.forEach(room => {
       const roomMeetings = dayMeetings
@@ -1196,7 +1299,6 @@ function renderTimetable(filtered){
       laneInfo[room] = { lanes: Math.max(1, laneEnds.length), byMeeting };
     });
 
-    // ---- Build DOM ----
     const dayWrap = document.createElement('div');
     dayWrap.className = 'tt-day';
 
@@ -1208,7 +1310,6 @@ function renderTimetable(filtered){
     const scrollWrap = document.createElement('div');
     scrollWrap.className = 'tt-scroll';
 
-    // Header row
     const header = document.createElement('div');
     header.className = 'tt-header';
     const headerSpacer = document.createElement('div');
@@ -1223,7 +1324,6 @@ function renderTimetable(filtered){
     });
     scrollWrap.appendChild(header);
 
-    // Body: time axis + one track per room
     const body = document.createElement('div');
     body.className = 'tt-body';
     body.style.height = totalHeight + 'px';
@@ -1263,7 +1363,7 @@ function renderTimetable(filtered){
           <span class="tt-block-time">${m.start}–${m.end}</span>
           <span class="tt-block-title">${m.title}</span>
         `;
-        block.addEventListener('click', () => requestUnlock(() => openMeetingForm(m), { requireManager: m.room !== ESICM_ROOM }));
+        block.addEventListener('click', () => openMeetingForm(m));
         track.appendChild(block);
       });
 
@@ -1289,109 +1389,14 @@ timetableViewBtn.addEventListener('click', () => {
   render();
 });
 
-// ---- Password gate (role separation on top of sign-in) ----
-// Signing in (above) proves who you are and unlocks the page at all.
-// This password layer is a separate, lighter-weight step that decides
-// *what* a signed-in person can touch: adding/editing accepts either
-// password, but editing/deleting any meeting (original or added) requires
-// specifically the manager password.
-let pendingRequireManager = false;
-
-function requestUnlock(onSuccess, { requireManager = false } = {}){
-  if(sessionRole === 'manager'){
-    onSuccess();
-    return;
-  }
-  if(!requireManager && sessionRole === 'regular'){
-    onSuccess();
-    return;
-  }
-  passwordError.style.display = 'none';
-  passwordInput.value = '';
-  pendingUnlockCallback = onSuccess;
-  pendingRequireManager = requireManager;
-  passwordModalSubtitle.textContent = requireManager
-    ? 'Editing or deleting a meeting requires the manager password.'
-    : 'Adding a meeting or exporting the list requires a congress secretariat password.';
-  passwordModal.style.display = 'flex';
-  setTimeout(() => passwordInput.focus(), 50);
-}
-
-passwordForm.addEventListener('submit', async e => {
-  e.preventDefault();
-  const value = passwordInput.value;
-  const wasManagerAlready = sessionRole === 'manager';
-
-  if(value === MANAGER_PASSWORD){
-    sessionRole = 'manager';
-  } else if(value === ADD_PASSWORD && !pendingRequireManager){
-    sessionRole = sessionRole === 'manager' ? 'manager' : 'regular';
-  } else {
-    passwordError.textContent = pendingRequireManager
-      ? 'That password can\'t edit meetings — the manager password is required.'
-      : 'Incorrect password. Please try again.';
-    passwordError.style.display = 'block';
-    passwordInput.value = '';
-    passwordInput.focus();
-    return;
-  }
-
-  passwordModal.style.display = 'none';
-  updateLoginButton();
-  populateDayFilter();
-  render();
-  const cb = pendingUnlockCallback;
-  pendingUnlockCallback = null;
-  pendingRequireManager = false;
-
-  if(sessionRole === 'manager' && !wasManagerAlready){
-    // A genuine fresh manager login this session — show what changed
-    // since they were last here, then continue to whatever they clicked.
-    historyContinueCallback = cb;
-    await showManagerHistory();
-  } else if(cb){
-    cb();
-  }
-});
-
-passwordCancelBtn.addEventListener('click', () => {
-  passwordModal.style.display = 'none';
-  pendingUnlockCallback = null;
-  pendingRequireManager = false;
-});
-
-// ---- Standalone login/logout button (password role, not the sign-in gate) ----
-function updateLoginButton(){
-  if(sessionRole === 'manager'){
-    loginBtn.textContent = 'Logout (Manager)';
-  } else if(sessionRole === 'regular'){
-    loginBtn.textContent = 'Logout (BM)';
-  } else {
-    loginBtn.textContent = 'Login';
-  }
-}
-
-loginBtn.addEventListener('click', () => {
-  if(sessionRole){
-    sessionRole = null;
-    updateLoginButton();
-    populateDayFilter();
-    render();
-  } else {
-    requestUnlock(() => updateLoginButton());
-  }
-});
-
-updateLoginButton();
-
-// ---- Manager change history ----
-async function showManagerHistory(){
-  const lastLogin = localStorage.getItem(LAST_MANAGER_LOGIN_KEY);
+// ---- Change history (any signed-in visitor; what changed, never who) ----
+async function showChangeHistory(){
+  const lastViewed = localStorage.getItem(LAST_VIEWED_CHANGELOG_KEY);
   let entries = [];
 
   try {
-    const q = lastLogin
-      ? query(changelogCollection, where('timestamp', '>', lastLogin), orderBy('timestamp', 'desc'))
+    const q = lastViewed
+      ? query(changelogCollection, where('timestamp', '>', lastViewed), orderBy('timestamp', 'desc'))
       : query(changelogCollection, orderBy('timestamp', 'desc'));
     const snap = await getDocs(q);
     entries = snap.docs.map(d => d.data());
@@ -1401,13 +1406,13 @@ async function showManagerHistory(){
 
   historyList.innerHTML = '';
 
-  if(!lastLogin){
-    historyIntro.textContent = 'First manager login recorded on this device — nothing to compare against yet. All changes from now on will show up here next time.';
+  if(!lastViewed){
+    historyIntro.textContent = 'First time viewing this on this device — nothing to compare against yet. All changes from now on will show up here next time.';
   } else {
-    const when = new Date(lastLogin).toLocaleString();
+    const when = new Date(lastViewed).toLocaleString();
     historyIntro.textContent = entries.length
-      ? `${entries.length} change${entries.length === 1 ? '' : 's'} since your last login (${when}):`
-      : `No changes since your last login (${when}).`;
+      ? `${entries.length} change${entries.length === 1 ? '' : 's'} since you last checked (${when}):`
+      : `No changes since you last checked (${when}).`;
   }
 
   const actionLabels = { added: 'Added', edited: 'Edited', deleted: 'Deleted' };
@@ -1416,86 +1421,50 @@ async function showManagerHistory(){
     row.className = 'history-row';
     row.innerHTML = `
       <span class="history-action history-${e.action}">${actionLabels[e.action] || e.action}</span>
-      <span class="history-detail">${e.title} — ${e.day} ${e.start}–${e.end}, ${e.room} <span class="history-role">(${e.role})</span></span>
+      <span class="history-detail">${e.title} — ${e.day} ${e.start}–${e.end}, ${e.room}</span>
     `;
     historyList.appendChild(row);
   });
 
-  localStorage.setItem(LAST_MANAGER_LOGIN_KEY, new Date().toISOString());
+  localStorage.setItem(LAST_VIEWED_CHANGELOG_KEY, new Date().toISOString());
   historyModal.style.display = 'flex';
 }
 
-function closeHistoryModal(){
+historyLink.addEventListener('click', async e => {
+  e.preventDefault();
+  await showChangeHistory();
+});
+historyContinueBtn.addEventListener('click', () => {
   historyModal.style.display = 'none';
-  const cb = historyContinueCallback;
-  historyContinueCallback = null;
-  if(cb) cb();
-}
+});
 
-historyContinueBtn.addEventListener('click', closeHistoryModal);
-
-// ---- Add / edit meeting form ----
-function currentRoomForForm(){
-  if(sessionRole === 'manager') return meetingRoomSelect.value;
-  if(editingId){
-    const existing = getAllMeetings().find(m => m.id === editingId);
-    if(existing) return existing.room;
-  }
-  return ESICM_ROOM;
-}
-
-function updateParticipantsHint(){
-  const val = Number(meetingParticipantsInput.value);
-  const room = currentRoomForForm();
-  const cap = ROOM_CAPACITY[room] || 30;
-  const roomShort = room.split('–')[0].trim();
-  if(val > cap){
-    participantsHint.textContent = `${roomShort} holds ${cap} — this exceeds capacity, please check with the secretariat.`;
-    participantsHint.style.color = '#a13030';
-  } else {
-    participantsHint.textContent = `${roomShort} capacity: ${cap} seated.`;
-    participantsHint.style.color = '';
-  }
-}
-meetingParticipantsInput.addEventListener('input', updateParticipantsHint);
-meetingRoomSelect.addEventListener('change', updateParticipantsHint);
-
-// Records every add/edit/delete so managers can see what changed since
-// their last login. No name/email is ever written here — the signed-in
-// person's identity lives only in Firebase Authentication (console-only
-// visibility for you), separate from this public-readable changelog.
-// Best-effort: a logging failure never blocks the underlying save/delete.
+// Records every add/edit/delete so visitors can see what changed (never
+// who - see auditLog below for that, admin-only).
 async function logChange(action, meeting){
-  const timestamp = new Date().toISOString();
   try {
     await addDoc(changelogCollection, {
-      timestamp,
+      timestamp: new Date().toISOString(),
       action,
       title: meeting.title || '',
       day: meeting.day || '',
       start: meeting.start || '',
       end: meeting.end || '',
-      room: meeting.room || '',
-      role: sessionRole || 'unknown'
+      room: meeting.room || ''
     });
   } catch(err){
     console.error('Could not write changelog entry:', err);
   }
 
-  // Separate, write-only record of *who* made this change. This never
-  // renders anywhere in the app - it's only readable via the Firestore
-  // console (see firestore.rules: auditLog denies all client reads).
   try {
     const user = auth.currentUser;
     await addDoc(auditLogCollection, {
-      timestamp,
+      timestamp: new Date().toISOString(),
       action,
       title: meeting.title || '',
       day: meeting.day || '',
       start: meeting.start || '',
       end: meeting.end || '',
       room: meeting.room || '',
-      role: sessionRole || 'unknown',
       submittedByUid: user ? user.uid : null,
       submittedByEmail: user ? user.email : null,
       submittedByName: user ? (user.displayName || null) : null
@@ -1505,21 +1474,14 @@ async function logChange(action, meeting){
   }
 }
 
+// ---- Add / edit meeting form ----
 function openMeetingForm(existing){
   editingId = existing ? existing.id : null;
   editingSource = existing ? existing.source : null;
   editingMeetingSnapshot = existing ? { ...existing } : null;
   meetingFormError.style.display = 'none';
+  suggestionsPanel.style.display = 'none';
   meetingFormTitle.textContent = existing ? 'Edit Business Meeting' : 'Add a new Business Meeting';
-
-  const isManager = sessionRole === 'manager';
-  meetingRoomRow.style.display = isManager ? '' : 'none';
-  if(isManager){
-    meetingFormSubtitle.innerHTML = 'Choose the room for this meeting below.';
-    meetingRoomSelect.value = existing ? existing.room : ESICM_ROOM;
-  } else {
-    meetingFormSubtitle.innerHTML = 'Location for meetings added here is fixed to <strong>ESICM Meeting Room – 1.08</strong>.';
-  }
 
   meetingDaySelect.value = existing ? existing.day : CONGRESS_DAYS[0].value;
   meetingStartInput.value = existing ? existing.start : '';
@@ -1527,14 +1489,12 @@ function openMeetingForm(existing){
   meetingNameInput.value = existing ? existing.title : '';
   meetingParticipantsInput.value = existing ? (existing.participants || '') : '';
   meetingNeedsInput.value = existing ? (existing.logisticsNotes || '') : '';
-  updateParticipantsHint();
+  updateRoomPreview();
   deleteMeetingBtn.style.display = existing ? 'inline-block' : 'none';
   meetingFormModal.style.display = 'flex';
 }
 
-addMeetingBtn.addEventListener('click', () => {
-  requestUnlock(() => openMeetingForm(null));
-});
+addMeetingBtn.addEventListener('click', () => openMeetingForm(null));
 
 meetingForm.addEventListener('submit', async e => {
   e.preventDefault();
@@ -1546,18 +1506,16 @@ meetingForm.addEventListener('submit', async e => {
   const title = meetingNameInput.value.trim();
   const participants = meetingParticipantsInput.value;
   const logisticsNotes = meetingNeedsInput.value.trim();
-  const room = sessionRole === 'manager' ? meetingRoomSelect.value : currentRoomForForm();
 
   const errors = [];
   if(!title) errors.push('Please enter a meeting name.');
   if(!start || !end){
     errors.push('Please enter both a start and end time.');
   } else {
-    if(start < '07:30' || end > '18:00') errors.push('Meetings must start at or after 07:30 and end at or before 18:00.');
+    if(start < OPEN_TIME || end > CLOSE_TIME) errors.push(`Meetings must start at or after ${OPEN_TIME} and end at or before ${CLOSE_TIME}.`);
     if(start >= end) errors.push('The end time must be after the start time.');
   }
   if(!participants || Number(participants) <= 0) errors.push('Please enter the expected number of participants.');
-  if(sessionRole === 'manager' && !ROOM_ORDER.includes(room)) errors.push('Please choose a valid room.');
 
   if(errors.length){
     meetingFormError.innerHTML = errors.join('<br>');
@@ -1565,12 +1523,27 @@ meetingForm.addEventListener('submit', async e => {
     return;
   }
 
+  const participantsNum = Number(participants);
+  const room = bestRoomFor(day, start, end, participantsNum, editingId);
+  if(!room){
+    // Fully booked for this size at this time - block the submission and
+    // show alternatives instead, rather than letting them force it through.
+    meetingFormError.style.display = 'none';
+    renderSuggestions(day, start, end, participantsNum);
+    return;
+  }
+
   const payload = {
     day, dayLabel, start, end, title,
     room,
-    participants: Number(participants),
+    participants: participantsNum,
     logisticsNotes
   };
+  if(editingId && editingSource === 'added'){
+    payload.createdByUid = editingMeetingSnapshot.createdByUid;
+  } else if(!editingId){
+    payload.createdByUid = auth.currentUser.uid;
+  }
 
   confirmMeetingBtn.disabled = true;
   confirmMeetingBtn.textContent = 'Saving…';
@@ -1592,7 +1565,9 @@ meetingForm.addEventListener('submit', async e => {
     editingMeetingSnapshot = null;
   } catch(err){
     console.error('Firestore write failed:', err);
-    meetingFormError.textContent = 'Could not save this meeting — check your connection and try again.';
+    meetingFormError.textContent = err.code === 'permission-denied'
+      ? 'Only the person who created this meeting, or an administrator, can save changes to it.'
+      : 'Could not save this meeting — someone may have just booked this slot, or your connection dropped. Please try again.';
     meetingFormError.style.display = 'block';
   } finally {
     confirmMeetingBtn.disabled = false;
@@ -1622,7 +1597,9 @@ deleteMeetingBtn.addEventListener('click', async () => {
     editingMeetingSnapshot = null;
   } catch(err){
     console.error('Firestore delete failed:', err);
-    meetingFormError.textContent = 'Could not delete this meeting — check your connection and try again.';
+    meetingFormError.textContent = err.code === 'permission-denied'
+      ? 'Only the person who created this meeting, or an administrator, can delete it.'
+      : 'Could not delete this meeting — check your connection and try again.';
     meetingFormError.style.display = 'block';
   } finally {
     deleteMeetingBtn.disabled = false;
@@ -1636,7 +1613,7 @@ cancelMeetingBtn.addEventListener('click', () => {
   editingMeetingSnapshot = null;
 });
 
-// ---- Export: password-gated Excel download (Meeting list + Timetable sheets) ----
+// ---- Export: Excel download (Meeting list + Timetable sheets) ----
 async function downloadExcelExport(){
   if(typeof XLSX === 'undefined'){
     alert('The spreadsheet library failed to load — check your internet connection and try again.');
@@ -1647,7 +1624,6 @@ async function downloadExcelExport(){
     .slice()
     .sort((a,b) => a.day.localeCompare(b.day) || a.start.localeCompare(b.start));
 
-  // ---- Sheet 1: Meeting list ----
   const listRows = [[
     'Day', 'Start', 'End', 'Meeting name', 'Room',
     'Participants', 'Logistics notes'
@@ -1665,10 +1641,9 @@ async function downloadExcelExport(){
     {wch:12}, {wch:34}
   ];
 
-  // ---- Sheet 2: Timetable (synoptic grid, one block per day) ----
   const ttRows = [];
   const merges = [];
-  const SLOT = 15; // matches the 15-minute step on the time inputs, so no rounding drift
+  const SLOT = 15;
 
   const grouped = {};
   all.forEach(m => { (grouped[m.day] = grouped[m.day] || []).push(m); });
@@ -1747,15 +1722,10 @@ async function downloadExcelExport(){
 
 exportLink.addEventListener('click', e => {
   e.preventDefault();
-  requestUnlock(() => downloadExcelExport());
+  downloadExcelExport();
 });
 
 // ---- Audit log (admin-only via Firestore rules, not a client-side check) ----
-// This link is visible to every signed-in visitor, which is fine: the
-// Firestore rules are what actually decide whether the query succeeds.
-// Anyone who isn't registered in the `admins` collection gets a
-// permission-denied error here and never sees any data, regardless of
-// what's rendered in this page's HTML/JS.
 auditLogLink.addEventListener('click', async e => {
   e.preventDefault();
   auditLogList.innerHTML = '<p class="history-empty">Loading…</p>';
@@ -1797,22 +1767,18 @@ auditLogModal.addEventListener('click', e => {
 });
 
 // Click outside a modal box, or Escape, closes it
-[passwordModal, meetingFormModal, historyModal].forEach(overlay => {
+[meetingFormModal, historyModal].forEach(overlay => {
   overlay.addEventListener('click', e => {
     if(e.target !== overlay) return;
-    if(overlay === historyModal){ closeHistoryModal(); return; }
     overlay.style.display = 'none';
-    if(overlay === passwordModal) pendingUnlockCallback = null;
     if(overlay === meetingFormModal){ editingId = null; editingSource = null; editingMeetingSnapshot = null; }
   });
 });
 document.addEventListener('keydown', e => {
   if(e.key !== 'Escape') return;
-  [passwordModal, meetingFormModal, historyModal].forEach(overlay => {
+  [meetingFormModal, historyModal, auditLogModal].forEach(overlay => {
     if(overlay.style.display !== 'none'){
-      if(overlay === historyModal){ closeHistoryModal(); return; }
       overlay.style.display = 'none';
-      if(overlay === passwordModal) pendingUnlockCallback = null;
       if(overlay === meetingFormModal){ editingId = null; editingSource = null; editingMeetingSnapshot = null; }
     }
   });
