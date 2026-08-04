@@ -591,6 +591,8 @@
     <a href="#" id="historyLink">Change history</a>
     &nbsp;·&nbsp;
     <a href="#" id="auditLogLink">Audit log</a>
+    &nbsp;·&nbsp;
+    <a href="#" id="detailedExportLink" style="display:none;">Detailed meeting list</a>
   </div>
 
   <div id="scheduleContainer"></div>
@@ -622,7 +624,7 @@
           <input type="time" id="meetingEnd" min="07:30" max="18:00" step="900">
         </div>
       </div>
-      <div class="form-hint">Opening hours vary by day (Monday closes at 17:00, Wednesday at 14:00). Saturday and Sunday are only bookable by ESICM/KIT Group accounts.</div>
+      <div class="form-hint">Opening hours vary by day (Monday closes at 17:00, Wednesday at 14:00). Meetings can last up to 2 hours.</div>
       <div class="form-row" style="margin-top:14px;">
         <label for="meetingName">Meeting name</label>
         <input type="text" id="meetingName" placeholder="e.g. TEM Section Meeting">
@@ -636,6 +638,12 @@
           <input type="checkbox" id="esicmRoomOptIn">
           <span>Book this meeting in the ESICM Meeting Room specifically (capacity 30), instead of the best available BM room.</span>
         </label>
+      </div>
+      <div class="form-row" id="adminRoomRow" style="display:none;">
+        <label for="meetingRoomSelect">Room (admin override — leave on auto-place unless you need to pick a specific room)</label>
+        <select id="meetingRoomSelect">
+          <option value="">Auto-place for me</option>
+        </select>
       </div>
       <div class="form-row">
         <div id="roomPreview" class="form-notice">Enter a day, time, and participant count to see which room you'll get.</div>
@@ -688,7 +696,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
 import {
   getFirestore, collection, onSnapshot,
-  addDoc, updateDoc, deleteDoc, setDoc, doc,
+  addDoc, updateDoc, deleteDoc, setDoc, doc, getDoc,
   query, where, orderBy, getDocs
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 import {
@@ -1007,6 +1015,8 @@ const meetingNameInput = document.getElementById('meetingName');
 const meetingParticipantsInput = document.getElementById('meetingParticipants');
 const esicmRoomOptRow = document.getElementById('esicmRoomOptRow');
 const esicmRoomOptIn = document.getElementById('esicmRoomOptIn');
+const adminRoomRow = document.getElementById('adminRoomRow');
+const meetingRoomSelect = document.getElementById('meetingRoomSelect');
 const roomPreview = document.getElementById('roomPreview');
 const suggestionsPanel = document.getElementById('suggestionsPanel');
 const suggestionsList = document.getElementById('suggestionsList');
@@ -1025,6 +1035,7 @@ const auditLogLink = document.getElementById('auditLogLink');
 const auditLogModal = document.getElementById('auditLogModal');
 const auditLogList = document.getElementById('auditLogList');
 const auditLogCloseBtn = document.getElementById('auditLogCloseBtn');
+const detailedExportLink = document.getElementById('detailedExportLink');
 
 let viewMode = 'list';
 let editingId = null;
@@ -1033,9 +1044,46 @@ let editingMeetingSnapshot = null; // full data of the meeting being edited, for
 const LAST_VIEWED_CHANGELOG_KEY = 'lastViewedChangelog';
 
 // The ESICM room legend entry is only meaningful for accounts that can
-// actually see or book that room.
-document.getElementById('esicmRoomLegend').style.display = isPrivilegedEmail() ? '' : 'none';
-esicmRoomOptRow.style.display = isPrivilegedEmail() ? '' : 'none';
+// actually see or book that room. Admin status can't be checked
+// synchronously (it requires a Firestore read of the account's own
+// admins/{uid} doc — see firestore.rules), so this also gets re-run once
+// checkAdminStatus() below resolves.
+let currentUserIsAdmin = false;
+
+function refreshPrivilegedUI(){
+  document.getElementById('esicmRoomLegend').style.display = isPrivilegedEmail() ? '' : 'none';
+  // Admins get the full manual room-picker instead of the plain ESICM
+  // opt-in checkbox, so only show one or the other.
+  esicmRoomOptRow.style.display = (isPrivilegedEmail() && !currentUserIsAdmin) ? '' : 'none';
+  adminRoomRow.style.display = currentUserIsAdmin ? '' : 'none';
+  // The regular export is limited to ESICM/KIT Group accounts; the
+  // detailed export (with names/emails/comments) is admin-only.
+  exportLink.style.display = isPrivilegedEmail() ? '' : 'none';
+  detailedExportLink.style.display = currentUserIsAdmin ? '' : 'none';
+}
+refreshPrivilegedUI();
+
+function populateMeetingRoomOptions(){
+  meetingRoomSelect.innerHTML = '<option value="">Auto-place for me</option>' +
+    BOOKABLE_ROOMS.map(r => `<option value="${r}">${r} (capacity ${ROOM_CAPACITY[r]})</option>`).join('');
+}
+
+// Admin status is intentionally NOT stored anywhere the client can read in
+// bulk — the admins collection denies list entirely (see firestore.rules).
+// Each signed-in account may only ever check its OWN uid's document, which
+// is exactly what this does; a permission-denied or missing-doc result
+// both mean "not an admin".
+async function checkAdminStatus(){
+  try {
+    const snap = await getDoc(doc(db, 'admins', auth.currentUser.uid));
+    currentUserIsAdmin = snap.exists();
+  } catch(err){
+    currentUserIsAdmin = false;
+  }
+  populateMeetingRoomOptions();
+  refreshPrivilegedUI();
+}
+checkAdminStatus();
 
 // Populates the ADD/EDIT form's day dropdown. Weekend days are left out for
 // non-privileged accounts, unless forceIncludeDay is a weekend day already
@@ -1251,6 +1299,40 @@ function updateRoomPreview(){
     return;
   }
 
+  // The 2-hour cap doesn't apply to edits of the original locked-in
+  // schedule (editingSource === 'snapshot') — several of those meetings
+  // were already longer than 2 hours before this feature existed, and
+  // only admins can touch that collection anyway.
+  if(editingSource !== 'snapshot' && (toMinutes(end) - toMinutes(start)) > 120){
+    roomPreview.textContent = 'Meetings can\'t be longer than 2 hours.';
+    roomPreview.className = 'form-error';
+    confirmMeetingBtn.disabled = true;
+    return;
+  }
+
+  // Admins can pick a specific room instead of relying on auto-placement.
+  const manualRoom = (currentUserIsAdmin && meetingRoomSelect.value) ? meetingRoomSelect.value : '';
+  if(manualRoom){
+    if(participants > ROOM_CAPACITY[manualRoom]){
+      roomPreview.textContent = `${manualRoom} holds up to ${ROOM_CAPACITY[manualRoom]} people — reduce participants or pick a different room.`;
+      roomPreview.className = 'form-error';
+      confirmMeetingBtn.disabled = true;
+      suggestionsPanel.style.display = 'none';
+      return;
+    }
+    if(roomIsFree(manualRoom, day, start, end, editingId)){
+      roomPreview.textContent = `Placed in ${manualRoom} (admin selection).`;
+      roomPreview.className = 'form-notice';
+      confirmMeetingBtn.disabled = false;
+    } else {
+      roomPreview.textContent = `${manualRoom} is already booked at this time.`;
+      roomPreview.className = 'form-error';
+      confirmMeetingBtn.disabled = true;
+    }
+    suggestionsPanel.style.display = 'none';
+    return;
+  }
+
   const wantsEsicmRoom = esicmRoomOptIn.checked && isPrivilegedEmail();
   if(wantsEsicmRoom && participants > ROOM_CAPACITY[ESICM_ROOM]){
     roomPreview.textContent = `The ESICM Meeting Room holds up to ${ROOM_CAPACITY[ESICM_ROOM]} people — reduce participants or uncheck the box above.`;
@@ -1274,6 +1356,7 @@ function updateRoomPreview(){
     renderSuggestions(day, start, end, participants, wantsEsicmRoom);
   }
 }
+meetingRoomSelect.addEventListener('change', updateRoomPreview);
 meetingDaySelect.addEventListener('change', updateRoomPreview);
 meetingStartInput.addEventListener('change', updateRoomPreview);
 meetingEndInput.addEventListener('change', updateRoomPreview);
@@ -1616,6 +1699,7 @@ function openMeetingForm(existing){
   meetingParticipantsInput.value = existing ? (existing.participants || '') : '';
   meetingNeedsInput.value = existing ? (existing.logisticsNotes || '') : '';
   esicmRoomOptIn.checked = existing ? existing.room === ESICM_ROOM : false;
+  meetingRoomSelect.value = (existing && BOOKABLE_ROOMS.includes(existing.room)) ? existing.room : '';
   updateRoomPreview();
   deleteMeetingBtn.style.display = existing ? 'inline-block' : 'none';
   meetingFormModal.style.display = 'flex';
@@ -1642,6 +1726,7 @@ meetingForm.addEventListener('submit', async e => {
   } else {
     if(start < daySettings.open || end > daySettings.close) errors.push(`Meetings on this day must start at or after ${daySettings.open} and end at or before ${daySettings.close}.`);
     if(start >= end) errors.push('The end time must be after the start time.');
+    else if(editingSource !== 'snapshot' && (toMinutes(end) - toMinutes(start)) > 120) errors.push('Meetings can\'t be longer than 2 hours.');
   }
   if(daySettings.weekendRestricted && !isPrivilegedEmail()) errors.push('Meetings on Saturday or Sunday can only be booked by ESICM or KIT Group accounts.');
   if(!participants || Number(participants) <= 0) errors.push('Please enter the expected number of participants.');
@@ -1653,19 +1738,37 @@ meetingForm.addEventListener('submit', async e => {
   }
 
   const participantsNum = Number(participants);
-  const wantsEsicmRoom = esicmRoomOptIn.checked && isPrivilegedEmail();
-  if(wantsEsicmRoom && participantsNum > ROOM_CAPACITY[ESICM_ROOM]){
-    meetingFormError.textContent = `The ESICM Meeting Room holds up to ${ROOM_CAPACITY[ESICM_ROOM]} people — reduce participants or uncheck the box above.`;
-    meetingFormError.style.display = 'block';
-    return;
-  }
-  const room = bestRoomFor(day, start, end, participantsNum, editingId, wantsEsicmRoom);
-  if(!room){
-    // Fully booked for this size at this time - block the submission and
-    // show alternatives instead, rather than letting them force it through.
-    meetingFormError.style.display = 'none';
-    renderSuggestions(day, start, end, participantsNum, wantsEsicmRoom);
-    return;
+  const manualRoom = (currentUserIsAdmin && meetingRoomSelect.value) ? meetingRoomSelect.value : '';
+  let room;
+
+  if(manualRoom){
+    // Admin has picked a specific room instead of relying on auto-placement.
+    if(participantsNum > ROOM_CAPACITY[manualRoom]){
+      meetingFormError.textContent = `${manualRoom} holds up to ${ROOM_CAPACITY[manualRoom]} people — reduce participants or pick a different room.`;
+      meetingFormError.style.display = 'block';
+      return;
+    }
+    if(!roomIsFree(manualRoom, day, start, end, editingId)){
+      meetingFormError.textContent = `${manualRoom} is already booked at this time.`;
+      meetingFormError.style.display = 'block';
+      return;
+    }
+    room = manualRoom;
+  } else {
+    const wantsEsicmRoom = esicmRoomOptIn.checked && isPrivilegedEmail();
+    if(wantsEsicmRoom && participantsNum > ROOM_CAPACITY[ESICM_ROOM]){
+      meetingFormError.textContent = `The ESICM Meeting Room holds up to ${ROOM_CAPACITY[ESICM_ROOM]} people — reduce participants or uncheck the box above.`;
+      meetingFormError.style.display = 'block';
+      return;
+    }
+    room = bestRoomFor(day, start, end, participantsNum, editingId, wantsEsicmRoom);
+    if(!room){
+      // Fully booked for this size at this time - block the submission and
+      // show alternatives instead, rather than letting them force it through.
+      meetingFormError.style.display = 'none';
+      renderSuggestions(day, start, end, participantsNum, wantsEsicmRoom);
+      return;
+    }
   }
 
   const payload = {
@@ -1857,7 +1960,81 @@ async function downloadExcelExport(){
 
 exportLink.addEventListener('click', e => {
   e.preventDefault();
+  if(!isPrivilegedEmail()){
+    alert('The meeting list export is only available to ESICM or KIT Group accounts.');
+    return;
+  }
   downloadExcelExport();
+});
+
+// ---- Export: Detailed meeting list (admin-only, name/surname/email/comments) ----
+// Never stored together anywhere in Firestore - built here, on demand, by
+// joining the (name/email-free) meetings collection with the write-only
+// auditLog collection, which only admins can read (see firestore.rules).
+// A given signed-in account's name/email is stable across every meeting
+// they create, so the account's OWN uid is enough to look their identity
+// up once and reuse it for every meeting they created.
+async function downloadDetailedExcelExport(){
+  if(typeof XLSX === 'undefined'){
+    alert('The spreadsheet library failed to load — check your internet connection and try again.');
+    return;
+  }
+
+  let auditSnap;
+  try {
+    auditSnap = await getDocs(query(collection(db, 'auditLog'), orderBy('timestamp', 'desc')));
+  } catch(err){
+    console.error('Detailed export failed — could not read audit log:', err);
+    alert("You don't have permission to download the detailed meeting list.");
+    return;
+  }
+
+  const uidToIdentity = {};
+  auditSnap.docs.forEach(d => {
+    const e = d.data();
+    if(e.submittedByUid && !uidToIdentity[e.submittedByUid]){
+      uidToIdentity[e.submittedByUid] = {
+        name: e.submittedByName || '',
+        email: e.submittedByEmail || ''
+      };
+    }
+  });
+
+  const all = getAllMeetings()
+    .slice()
+    .sort((a,b) => a.day.localeCompare(b.day) || a.start.localeCompare(b.start));
+
+  const rows = [[
+    'Day', 'Start', 'End', 'Meeting name', 'Room', 'Participants',
+    'Name', 'Surname', 'Email', 'Comments'
+  ]];
+  all.forEach(m => {
+    const identity = m.createdByUid ? uidToIdentity[m.createdByUid] : null;
+    const fullName = identity ? (identity.name || '').trim() : '';
+    const [firstName, ...rest] = fullName ? fullName.split(/\s+/) : [''];
+    rows.push([
+      m.dayLabel, m.start, m.end, m.title, m.room,
+      m.participants != null ? m.participants : '',
+      identity ? firstName : '',
+      identity ? rest.join(' ') : '',
+      identity ? identity.email : '',
+      m.logisticsNotes || ''
+    ]);
+  });
+
+  const sheet = XLSX.utils.aoa_to_sheet(rows);
+  sheet['!cols'] = [
+    {wch:12}, {wch:7}, {wch:7}, {wch:34}, {wch:24}, {wch:12},
+    {wch:16}, {wch:16}, {wch:28}, {wch:34}
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheet, 'Detailed meeting list');
+  XLSX.writeFile(wb, `ESICM2026_Detailed_Meeting_List_${berlinTimestampForFilename()}.xlsx`);
+}
+
+detailedExportLink.addEventListener('click', e => {
+  e.preventDefault();
+  downloadDetailedExcelExport();
 });
 
 // ---- Audit log (admin-only via Firestore rules, not a client-side check) ----
