@@ -593,6 +593,8 @@
     <a href="#" id="auditLogLink">Audit log</a>
     &nbsp;·&nbsp;
     <a href="#" id="detailedExportLink" style="display:none;">Detailed meeting list</a>
+    &nbsp;·&nbsp;
+    <a href="#" id="bulkImportContactsLink" style="display:none;">Import contact details</a>
   </div>
 
   <div id="scheduleContainer"></div>
@@ -702,6 +704,20 @@
     <div id="auditLogList" style="max-height:400px; overflow-y:auto;"></div>
     <div class="modal-actions">
       <button type="button" class="btn-secondary" id="auditLogCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="bulkImportModal">
+  <div class="modal-box" style="max-width:640px;">
+    <h2>Import contact details</h2>
+    <p class="modal-sub">Paste the JSON contact list below (one entry per meeting id, e.g. <code>{"snap-01":{"name":"...","surname":"...","email":"..."}}</code>). This writes straight to the admin-only snapshotContacts collection through your own signed-in session — nothing pasted here is ever saved to this page's source code or shown to anyone but admins. Clear the box and close this dialog once the import finishes.</p>
+    <textarea id="bulkImportTextarea" rows="10" style="width:100%; box-sizing:border-box; font-family:monospace; font-size:12px;" placeholder='{"snap-01": {"name":"Jane", "surname":"Doe", "email":"jane.doe@example.com"}}'></textarea>
+    <div class="form-error" id="bulkImportError" style="display:none; margin-top:8px;"></div>
+    <div class="form-notice" id="bulkImportStatus" style="display:none; margin-top:8px;"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="bulkImportCloseBtn">Close</button>
+      <button type="button" class="btn-primary" id="bulkImportRunBtn">Import</button>
     </div>
   </div>
 </div>
@@ -1064,6 +1080,13 @@ const auditLogModal = document.getElementById('auditLogModal');
 const auditLogList = document.getElementById('auditLogList');
 const auditLogCloseBtn = document.getElementById('auditLogCloseBtn');
 const detailedExportLink = document.getElementById('detailedExportLink');
+const bulkImportContactsLink = document.getElementById('bulkImportContactsLink');
+const bulkImportModal = document.getElementById('bulkImportModal');
+const bulkImportTextarea = document.getElementById('bulkImportTextarea');
+const bulkImportError = document.getElementById('bulkImportError');
+const bulkImportStatus = document.getElementById('bulkImportStatus');
+const bulkImportCloseBtn = document.getElementById('bulkImportCloseBtn');
+const bulkImportRunBtn = document.getElementById('bulkImportRunBtn');
 
 let viewMode = 'list';
 let editingId = null;
@@ -1088,6 +1111,7 @@ function refreshPrivilegedUI(){
   // detailed export (with names/emails/comments) is admin-only.
   exportLink.style.display = isPrivilegedEmail() ? '' : 'none';
   detailedExportLink.style.display = currentUserIsAdmin ? '' : 'none';
+  bulkImportContactsLink.style.display = currentUserIsAdmin ? '' : 'none';
 }
 refreshPrivilegedUI();
 
@@ -1729,15 +1753,20 @@ async function openMeetingForm(existing){
   esicmRoomOptIn.checked = existing ? existing.room === ESICM_ROOM : false;
   meetingRoomSelect.value = (existing && BOOKABLE_ROOMS.includes(existing.room)) ? existing.room : '';
 
-  // Admin-only contact details only make sense for the original planner
-  // meetings (source === 'snapshot') - attendee-added meetings already have
-  // their creator's identity captured automatically via auditLog.
-  const showContactBlock = currentUserIsAdmin && existing && existing.source === 'snapshot';
+  // Admin-only contact details. For the original planner meetings (source
+  // === 'snapshot') this is the ONLY identity that will ever exist, since
+  // there's no creator account. For any meeting an admin adds or edits
+  // themselves, this also lets them record the actual organiser's contact
+  // details instead of the detailed export just showing the admin's own
+  // account (which is what auditLog would otherwise capture as "creator").
+  // A brand-new meeting has no id yet, so there's nothing to preload - the
+  // fields start blank and get saved once the meeting itself is created.
+  const showContactBlock = currentUserIsAdmin;
   adminContactBlock.style.display = showContactBlock ? 'block' : 'none';
   contactNameInput.value = '';
   contactSurnameInput.value = '';
   contactEmailInput.value = '';
-  if(showContactBlock){
+  if(showContactBlock && existing){
     try {
       const snap = await getDoc(doc(db, 'snapshotContacts', existing.id));
       if(snap.exists()){
@@ -1840,28 +1869,33 @@ meetingForm.addEventListener('submit', async e => {
 
   try {
     const wasEditing = !!editingId;
+    let savedMeetingId = editingId;
     if(editingId && editingSource === 'snapshot'){
       await setDoc(doc(db, 'overrides', editingId), payload);
     } else if(editingId){
       await updateDoc(doc(db, 'meetings', editingId), payload);
     } else {
-      await addDoc(meetingsCollection, payload);
+      const newDocRef = await addDoc(meetingsCollection, payload);
+      savedMeetingId = newDocRef.id;
     }
 
     // Admin-only contact details, saved separately from the meeting itself
-    // (only ever readable via isAdmin() - see firestore.rules). Only
-    // applies to the original planner meetings, and only for admins.
-    if(currentUserIsAdmin && wasEditing && editingSource === 'snapshot'){
+    // (only ever readable via isAdmin() - see firestore.rules). Available
+    // for any meeting an admin adds or edits - not just the original
+    // planner meetings - so an admin can record the real organiser's
+    // contact info even for a meeting they're entering themselves (rather
+    // than the detailed export just showing the admin's own account).
+    if(currentUserIsAdmin){
       const contactName = contactNameInput.value.trim();
       const contactSurname = contactSurnameInput.value.trim();
       const contactEmail = contactEmailInput.value.trim();
       try {
         if(contactName || contactSurname || contactEmail){
-          await setDoc(doc(db, 'snapshotContacts', editingId), {
+          await setDoc(doc(db, 'snapshotContacts', savedMeetingId), {
             name: contactName, surname: contactSurname, email: contactEmail
           });
         } else {
-          await deleteDoc(doc(db, 'snapshotContacts', editingId)).catch(() => {});
+          await deleteDoc(doc(db, 'snapshotContacts', savedMeetingId)).catch(() => {});
         }
       } catch(err){
         console.error('Could not save contact details:', err);
@@ -2077,9 +2111,11 @@ async function downloadDetailedExcelExport(){
     }
   });
 
-  // Original planner meetings have no creator account at all - their
-  // contact details, if entered, live in the admin-only snapshotContacts
-  // collection, keyed by the meeting's own snap-NN id.
+  // Original planner meetings have no creator account at all, so any
+  // contact info for them can only ever come from here. For attendee-added
+  // meetings, an admin may also have manually entered/overridden the real
+  // organiser's details (e.g. when the admin booked on someone else's
+  // behalf) - keyed by the meeting's own Firestore doc id either way.
   const meetingIdToContact = {};
   contactsSnap.docs.forEach(d => {
     meetingIdToContact[d.id] = d.data();
@@ -2095,13 +2131,14 @@ async function downloadDetailedExcelExport(){
   ]];
   all.forEach(m => {
     let name = '', surname = '', email = '';
-    if(m.source === 'snapshot'){
-      const contact = meetingIdToContact[m.id];
-      if(contact){
-        name = contact.name || '';
-        surname = contact.surname || '';
-        email = contact.email || '';
-      }
+    const manualContact = meetingIdToContact[m.id];
+    if(manualContact){
+      // A manually-entered contact always wins, for any meeting type - it's
+      // the only option for original planner meetings, and an intentional
+      // admin override for attendee-added ones.
+      name = manualContact.name || '';
+      surname = manualContact.surname || '';
+      email = manualContact.email || '';
     } else if(m.createdByUid && uidToIdentity[m.createdByUid]){
       const identity = uidToIdentity[m.createdByUid];
       const fullName = (identity.name || '').trim();
@@ -2174,6 +2211,90 @@ auditLogModal.addEventListener('click', e => {
   if(e.target === auditLogModal) auditLogModal.style.display = 'none';
 });
 
+// ---- Bulk import contact details (admin-only) ----
+// Deliberately NOT baked into this file's source - the whole point is that
+// nothing pasted here ever gets committed anywhere. It's only ever held in
+// this one admin's browser tab for as long as the dialog is open, then
+// written straight to the admin-only snapshotContacts collection via the
+// normal client SDK (protected by firestore.rules the same way every other
+// write on this page is).
+function resetBulkImportDialog(){
+  bulkImportError.style.display = 'none';
+  bulkImportStatus.style.display = 'none';
+  bulkImportRunBtn.disabled = false;
+  bulkImportRunBtn.textContent = 'Import';
+}
+
+bulkImportContactsLink.addEventListener('click', e => {
+  e.preventDefault();
+  bulkImportTextarea.value = '';
+  resetBulkImportDialog();
+  bulkImportModal.style.display = 'flex';
+});
+
+bulkImportRunBtn.addEventListener('click', async () => {
+  bulkImportError.style.display = 'none';
+  bulkImportStatus.style.display = 'none';
+
+  let parsed;
+  try {
+    parsed = JSON.parse(bulkImportTextarea.value);
+  } catch(err){
+    bulkImportError.textContent = 'That\'s not valid JSON — check for a missing brace or comma and try again.';
+    bulkImportError.style.display = 'block';
+    return;
+  }
+
+  const entries = Object.entries(parsed || {});
+  if(entries.length === 0){
+    bulkImportError.textContent = 'No entries found in that JSON.';
+    bulkImportError.style.display = 'block';
+    return;
+  }
+
+  bulkImportRunBtn.disabled = true;
+  bulkImportRunBtn.textContent = 'Importing…';
+
+  let succeeded = 0;
+  const failed = [];
+  for(const [meetingId, contact] of entries){
+    const name = (contact && contact.name || '').trim();
+    const surname = (contact && contact.surname || '').trim();
+    const email = (contact && contact.email || '').trim();
+    try {
+      if(name || surname || email){
+        await setDoc(doc(db, 'snapshotContacts', meetingId), { name, surname, email });
+      }
+      succeeded++;
+    } catch(err){
+      console.error(`Could not import contact for ${meetingId}:`, err);
+      failed.push(meetingId);
+    }
+  }
+
+  bulkImportRunBtn.disabled = false;
+  bulkImportRunBtn.textContent = 'Import';
+  bulkImportStatus.style.display = 'block';
+  bulkImportStatus.textContent = failed.length === 0
+    ? `Imported ${succeeded} contact${succeeded === 1 ? '' : 's'} successfully.`
+    : `Imported ${succeeded - failed.length} of ${succeeded} — failed: ${failed.join(', ')}.`;
+
+  // Clear the pasted data from the page as soon as the import is done -
+  // there's no reason for it to keep sitting in the DOM/memory.
+  bulkImportTextarea.value = '';
+});
+
+bulkImportCloseBtn.addEventListener('click', () => {
+  bulkImportTextarea.value = '';
+  bulkImportModal.style.display = 'none';
+});
+bulkImportModal.addEventListener('click', e => {
+  if(e.target === bulkImportModal){
+    bulkImportTextarea.value = '';
+    bulkImportModal.style.display = 'none';
+  }
+});
+
 // Click outside a modal box, or Escape, closes it
 [meetingFormModal, historyModal].forEach(overlay => {
   overlay.addEventListener('click', e => {
@@ -2184,10 +2305,11 @@ auditLogModal.addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => {
   if(e.key !== 'Escape') return;
-  [meetingFormModal, historyModal, auditLogModal].forEach(overlay => {
+  [meetingFormModal, historyModal, auditLogModal, bulkImportModal].forEach(overlay => {
     if(overlay.style.display !== 'none'){
       overlay.style.display = 'none';
       if(overlay === meetingFormModal){ editingId = null; editingSource = null; editingMeetingSnapshot = null; }
+      if(overlay === bulkImportModal){ bulkImportTextarea.value = ''; }
     }
   });
 });
